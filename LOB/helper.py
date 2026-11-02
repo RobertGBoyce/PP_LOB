@@ -9,6 +9,13 @@ def this_sqrt(x):
 # Apply the function using np.vectorize
 this_vec_sqrt = np.vectorize(this_sqrt)
 
+def this_log(x):
+    eps = 10**(-8)
+    return math.log(max(x,eps))
+
+# Apply the function using np.vectorize
+this_vec_log = np.vectorize(this_log)
+
 def expw_zscore(df : pd.DataFrame, lookback : int = 501) -> pd.DataFrame:
     eps = 10**(-6)
 
@@ -20,9 +27,9 @@ def expw_zscore(df : pd.DataFrame, lookback : int = 501) -> pd.DataFrame:
     df_output = pd.DataFrame() # empty dataframe
 
     these_columns = list(df.columns).copy()
-    print(these_columns)
+    #print(these_columns)
     for col_name in these_columns:
-        print(col_name)
+        #print(col_name)
         mu_col = col_name + "_mu"
         np_mu_col = df[col_name].ewm(alpha=this_alpha, adjust=False).mean().shift(1)
         np_mu_col[0] = df[col_name].iloc[0]
@@ -30,7 +37,7 @@ def expw_zscore(df : pd.DataFrame, lookback : int = 501) -> pd.DataFrame:
         # V_0 = 0,  V_{i+1} = lam*V_i + (1-lam)*(x_i - mu_i)**2
         sq_dev = (df[col_name] - np_mu_col) ** 2
         #V_col = col_name + "_V"
-        np_V_col = sq_dev.ewm(alpha=alpha, adjust=False).mean().shift(1)
+        np_V_col = sq_dev.ewm(alpha=this_alpha, adjust=False).mean().shift(1)
         np_V_col[0] = 0.0
 
         #eps = 10**(-6)
@@ -44,9 +51,16 @@ def expw_zscore(df : pd.DataFrame, lookback : int = 501) -> pd.DataFrame:
 
     return df_output
     
-def read_and_format_orderbook(orderbook_file : str = "UNDEFINED") -> pd.DataFrame:
+def read_and_format_orderbook(orderbook_file : str = "UNDEFINED",
+                                min_index : int = -1,
+                                max_index : int = -1) -> pd.DataFrame:
     
-    df_ob=pd.read_csv(orderbook_file)
+    #df_ob=pd.read_csv(orderbook_file)
+    df_ob = pd.DataFrame() # empty dataframe
+    if min_index > 0 and max_index > min_index:
+        df_ob = pd.read_csv(orderbook_file, skiprows=range(1, min_index + 1), nrows = max_index - min_index)
+    else:
+        df_ob=pd.read_csv(orderbook_file)
 
     # Add column names
     df_ob.columns=[
@@ -249,16 +263,16 @@ def generate_orderbook_cum_size_log_cum_size(df_ob : pd.DataFrame,
 
     eps = 10**(-6)
 
-    df_ob_log_cum_size["log_cum_AskSize_1_1"] = math.log(math.max(eps, ob_cum_AskSize_1_1))
-    df_ob_log_cum_size["log_cum_AskSize_1_2"] = math.log(math.max(eps, ob_cum_AskSize_1_2))
-    df_ob_log_cum_size["log_cum_AskSize_1_3"] = math.log(math.max(eps, ob_cum_AskSize_1_3))
-    df_ob_log_cum_size["log_cum_AskSize_1_4"] = math.log(math.max(eps, ob_cum_AskSize_1_4))
-    df_ob_log_cum_size["log_cum_AskSize_1_5"] = math.log(math.max(eps, ob_cum_AskSize_1_5))
-    df_ob_log_cum_size["log_cum_AskSize_1_6"] = math.log(math.max(eps, ob_cum_AskSize_1_6))
-    df_ob_log_cum_size["log_cum_AskSize_1_7"] = math.log(math.max(eps, ob_cum_AskSize_1_7))
-    df_ob_log_cum_size["log_cum_AskSize_1_8"] = math.log(math.max(eps, ob_cum_AskSize_1_8))
-    df_ob_log_cum_size["log_cum_AskSize_1_9"] = math.log(math.max(eps, ob_cum_AskSize_1_9))
-    df_ob_log_cum_size["log_cum_AskSize_1_10"] = math.log(math.max(eps, ob_cum_AskSize_1_10))
+    df_ob_log_cum_size["log_cum_AskSize_1_1"] = this_vec_log(ob_cum_AskSize_1_1)
+    df_ob_log_cum_size["log_cum_AskSize_1_2"] = this_vec_log(ob_cum_AskSize_1_2)
+    df_ob_log_cum_size["log_cum_AskSize_1_3"] = this_vec_log(ob_cum_AskSize_1_3)
+    df_ob_log_cum_size["log_cum_AskSize_1_4"] = this_vec_log(ob_cum_AskSize_1_4)
+    df_ob_log_cum_size["log_cum_AskSize_1_5"] = this_vec_log(ob_cum_AskSize_1_5)
+    df_ob_log_cum_size["log_cum_AskSize_1_6"] = this_vec_log(ob_cum_AskSize_1_6)
+    df_ob_log_cum_size["log_cum_AskSize_1_7"] = this_vec_log(ob_cum_AskSize_1_7)
+    df_ob_log_cum_size["log_cum_AskSize_1_8"] = this_vec_log(ob_cum_AskSize_1_8)
+    df_ob_log_cum_size["log_cum_AskSize_1_9"] = this_vec_log(ob_cum_AskSize_1_9)
+    df_ob_log_cum_size["log_cum_AskSize_1_10"] = this_vec_log(ob_cum_AskSize_1_10)
 
     ob_cum_BidSize_1_1 = df_ob["BidSize1"][min_index : max_index]
     ob_cum_BidSize_1_2 = ob_cum_BidSize_1_1 + df_ob["BidSize2"][min_index : max_index]
@@ -282,16 +296,33 @@ def generate_orderbook_cum_size_log_cum_size(df_ob : pd.DataFrame,
     df_ob_cum_size["cum_BidSize_1_9"] = ob_cum_BidSize_1_9
     df_ob_cum_size["cum_BidSize_1_10"] = ob_cum_BidSize_1_10
 
-    df_ob_log_cum_size["log_cum_BidSize_1_1"] = math.log(math.max(eps, ob_cum_BidSize_1_1))
-    df_ob_log_cum_size["log_cum_BidSize_1_2"] = math.log(math.max(eps, ob_cum_BidSize_1_2))
-    df_ob_log_cum_size["log_cum_BidSize_1_3"] = math.log(math.max(eps, ob_cum_BidSize_1_3))
-    df_ob_log_cum_size["log_cum_BidSize_1_4"] = math.log(math.max(eps, ob_cum_BidSize_1_4))
-    df_ob_log_cum_size["log_cum_BidSize_1_5"] = math.log(math.max(eps, ob_cum_BidSize_1_5))
-    df_ob_log_cum_size["log_cum_BidSize_1_6"] = math.log(math.max(eps, ob_cum_BidSize_1_6))
-    df_ob_log_cum_size["log_cum_BidSize_1_7"] = math.log(math.max(eps, ob_cum_BidSize_1_7))
-    df_ob_log_cum_size["log_cum_BidSize_1_8"] = math.log(math.max(eps, ob_cum_BidSize_1_8))
-    df_ob_log_cum_size["log_cum_BidSize_1_9"] = math.log(math.max(eps, ob_cum_BidSize_1_9))
-    df_ob_log_cum_size["log_cum_BidSize_1_10"] = math.log(math.max(eps, ob_cum_BidSize_1_10))
+    df_ob_log_cum_size["log_cum_BidSize_1_1"] = this_vec_log(ob_cum_BidSize_1_1)
+    df_ob_log_cum_size["log_cum_BidSize_1_2"] = this_vec_log(ob_cum_BidSize_1_2)
+    df_ob_log_cum_size["log_cum_BidSize_1_3"] = this_vec_log(ob_cum_BidSize_1_3)
+    df_ob_log_cum_size["log_cum_BidSize_1_4"] = this_vec_log(ob_cum_BidSize_1_4)
+    df_ob_log_cum_size["log_cum_BidSize_1_5"] = this_vec_log(ob_cum_BidSize_1_5)
+    df_ob_log_cum_size["log_cum_BidSize_1_6"] = this_vec_log(ob_cum_BidSize_1_6)
+    df_ob_log_cum_size["log_cum_BidSize_1_7"] = this_vec_log(ob_cum_BidSize_1_7)
+    df_ob_log_cum_size["log_cum_BidSize_1_8"] = this_vec_log(ob_cum_BidSize_1_8)
+    df_ob_log_cum_size["log_cum_BidSize_1_9"] = this_vec_log(ob_cum_BidSize_1_9)
+    df_ob_log_cum_size["log_cum_BidSize_1_10"] = this_vec_log(ob_cum_BidSize_1_10)
 
     return df_ob_cum_size, df_ob_log_cum_size
 
+def create_representation_one(ob_file_name : str = "UNDEFINED", 
+        min_index : int = -1, 
+        max_index : int = -1
+        ) -> pd.DataFrame:
+        
+        df_ob = read_and_format_orderbook(ob_file_name, min_index, max_index)
+        
+        df_price_diffs = generate_orderbook_price_diffs(df_ob)
+        df_price_diffs_z_scores = expw_zscore(df_price_diffs)
+        
+        df_ob_cum_size, df_ob_log_cum_size = generate_orderbook_cum_size_log_cum_size(df_ob)
+        df_ob_cum_size_z_scores = expw_zscore(df_ob_cum_size)
+        df_ob_log_cum_size_z_scores = expw_zscore(df_ob_log_cum_size)
+        
+        df_representation_one = (df_price_diffs_z_scores.join(df_ob_cum_size_z_scores)).join(df_ob_log_cum_size_z_scores)
+        
+        return df_representation_one
