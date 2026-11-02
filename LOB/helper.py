@@ -336,34 +336,58 @@ def generate_orderbook_cum_size_log_cum_size(df_ob : pd.DataFrame,
     return df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance
 
 def create_representation_one(ob_file_name : str = "UNDEFINED", 
+        use_price_diffs_z_scores : bool = True,
+        use_cum_size_z_scores : bool = True,
+        use_log_cum_size_z_scores : bool = True,
+        use_ob_imbalance : bool = True,
+        use_ob_imbalance_z_scores : bool = True,
+        use_ob_log_imbalance : bool = True,
+        use_ob_log_imbalance_z_scores : bool = True,
+        lookback : int = 501,
         min_index : int = -1, 
         max_index : int = -1
         ) -> pd.DataFrame:
         
         df_ob = read_and_format_orderbook(ob_file_name, min_index, max_index)
         
-        df_price_diffs = generate_orderbook_price_diffs(df_ob)
-        df_price_diffs_z_scores = expw_zscore(df_price_diffs)
+        df_price_diffs = pd.DataFrame()
+        df_price_diffs_z_scores = pd.DataFrame()
+        df_ob_cum_size = pd.DataFrame() 
+        df_ob_cum_size_z_scores = pd.DataFrame()
+        df_ob_log_cum_size = pd.DataFrame() 
+        df_ob_log_cum_size_z_scores = pd.DataFrame() 
+        df_ob_imbalance = pd.DataFrame()
+        df_ob_imbalance_z_scores = pd.DataFrame() 
+        df_ob_log_imbalance = pd.DataFrame()        
+        df_ob_log_imbalance_z_scores = pd.DataFrame()
         
-        df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance = generate_orderbook_cum_size_log_cum_size(df_ob)
-        df_ob_cum_size_z_scores = expw_zscore(df_ob_cum_size)
-        df_ob_log_cum_size_z_scores = expw_zscore(df_ob_log_cum_size)
-        df_ob_imbalance_z_scores = expw_zscore(df_ob_imbalance)
-        df_ob_log_imbalance_z_scores = expw_zscore(df_ob_log_imbalance)
+        
+        if use_price_diffs_z_scores:
+            df_price_diffs = generate_orderbook_price_diffs(df_ob)
+            df_price_diffs_z_scores = expw_zscore(df_price_diffs, lookback)
+            
+        if (use_cum_size_z_scores or use_log_cum_size_z_scores):  
+            df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance = generate_orderbook_cum_size_log_cum_size(df_ob)
+            
+            df_ob_cum_size_z_scores = expw_zscore(df_ob_cum_size, lookback)
+            df_ob_log_cum_size_z_scores = expw_zscore(df_ob_log_cum_size, lookback)
+            df_ob_imbalance_z_scores = expw_zscore(df_ob_imbalance, lookback)
+            df_ob_log_imbalance_z_scores = expw_zscore(df_ob_log_imbalance, lookback)
         
         df_representation_one = pd.DataFrame() # empty dataframe
-        df_representation_one = df_representation_one.join(df_price_diffs_z_scores)
-        df_representation_one = df_representation_one.join(df_ob_cum_size_z_scores)
-        df_representation_one = df_representation_one.join(df_ob_log_cum_size_z_scores)
-        df_representation_one = df_representation_one.join(df_ob_imbalance[len(df_ob_imbalance) - len(df_ob_imbalance_z_scores):])
-        df_representation_one = df_representation_one.join(df_ob_imbalance_z_scores)
-        
-        #print("df_ob_log_imbalance.shape = ", df_ob_log_imbalance.shape)
-        #print("df_ob_log_imbalance.shape = ", df_ob_log_imbalance.shape)
-        #combined = pd.concat([df1, df2], axis=1)
-        df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance[len(df_ob_log_imbalance) - len(df_ob_log_imbalance_z_scores):]], axis = 1)
-        #df_representation_one = df_representation_one.join(df_ob_log_imbalance[len(df_ob_log_imbalance) - len(df_ob_log_imbalance_z_scores):])
-        #df_representation_one = df_representation_one.join(df_ob_log_imbalance_z_scores)
-        df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance_z_scores], axis = 1)
+        if use_price_diffs_z_scores:
+            df_representation_one = df_representation_one.join(df_price_diffs_z_scores)       
+        if use_cum_size_z_scores:
+            df_representation_one = df_representation_one.join(df_ob_cum_size_z_scores)
+        if use_log_cum_size_z_scores:
+            df_representation_one = df_representation_one.join(df_ob_log_cum_size_z_scores)
+        if use_ob_imbalance:
+            df_representation_one = df_representation_one.join(df_ob_imbalance[lookback:])
+        if use_ob_imbalance_z_scores:
+            df_representation_one = df_representation_one.join(df_ob_imbalance_z_scores)          
+        if use_ob_log_imbalance:
+            df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance[lookback:]], axis = 1)
+        if use_ob_log_imbalance_z_scores:
+            df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance_z_scores], axis = 1)
         
         return df_representation_one
