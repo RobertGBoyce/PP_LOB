@@ -240,6 +240,8 @@ def generate_orderbook_cum_size_log_cum_size(df_ob : pd.DataFrame,
     df_ob_log_cum_size = pd.DataFrame() # empty dataframe
     df_ob_imbalance = pd.DataFrame() # empty dataframe
     df_ob_log_imbalance = pd.DataFrame() # empty dataframe
+    df_ob_total_size = pd.DataFrame() # empty dataframe
+    df_ob_log_total_size = pd.DataFrame() # empty dataframe
     
     ob_cum_AskSize_1_1 = df_ob["AskSize1"] [min_index : max_index]
     ob_cum_AskSize_1_2 = ob_cum_AskSize_1_1 + df_ob["AskSize2"][min_index : max_index]
@@ -332,8 +334,30 @@ def generate_orderbook_cum_size_log_cum_size(df_ob : pd.DataFrame,
     df_ob_log_imbalance["cum_BidSize_minus_AskSize_1_8"] = (this_vec_log(ob_cum_BidSize_1_8) - this_vec_log(ob_cum_AskSize_1_8)) / (this_vec_log(ob_cum_BidSize_1_8) + this_vec_log(ob_cum_AskSize_1_8) + eps * np.ones(num_rows))
     df_ob_log_imbalance["cum_BidSize_minus_AskSize_1_9"] = (this_vec_log(ob_cum_BidSize_1_9) - this_vec_log(ob_cum_AskSize_1_9)) / (this_vec_log(ob_cum_BidSize_1_9) + this_vec_log(ob_cum_AskSize_1_9) + eps * np.ones(num_rows))
     df_ob_log_imbalance["cum_BidSize_minus_AskSize_1_10"] = (this_vec_log(ob_cum_BidSize_1_10) - this_vec_log(ob_cum_AskSize_1_10)) / (this_vec_log(ob_cum_BidSize_1_10) + this_vec_log(ob_cum_AskSize_1_10) + eps * np.ones(num_rows))
+    
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_1"] = ob_cum_BidSize_1_1 + ob_cum_AskSize_1_1 
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_2"] = ob_cum_BidSize_1_2 + ob_cum_AskSize_1_2
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_3"] = ob_cum_BidSize_1_3 + ob_cum_AskSize_1_3
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_4"] = ob_cum_BidSize_1_4 + ob_cum_AskSize_1_4
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_5"] = ob_cum_BidSize_1_5 + ob_cum_AskSize_1_5
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_6"] = ob_cum_BidSize_1_6 + ob_cum_AskSize_1_6
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_7"] = ob_cum_BidSize_1_7 + ob_cum_AskSize_1_7
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_8"] = ob_cum_BidSize_1_8 + ob_cum_AskSize_1_8
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_9"] = ob_cum_BidSize_1_9 + ob_cum_AskSize_1_9
+    df_ob_total_size["cum_BidSize_plus_AskSize_1_10"] = ob_cum_BidSize_1_10 + ob_cum_AskSize_1_10
+    
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_1"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_1"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_2"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_2"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_3"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_3"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_4"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_4"]) 
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_5"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_5"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_6"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_6"]) 
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_7"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_7"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_8"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_8"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_9"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_9"])
+    df_ob_log_total_size["cum_BidSize_plus_AskSize_1_10"] = this_vec_log(df_ob_total_size["cum_BidSize_plus_AskSize_1_10"])
 
-    return df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance
+    return df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance, df_ob_total_size, df_ob_log_total_size
 
 def create_representation_one(ob_file_name : str = "UNDEFINED", 
         use_price_diffs_z_scores : bool = True,
@@ -343,6 +367,8 @@ def create_representation_one(ob_file_name : str = "UNDEFINED",
         use_ob_imbalance_z_scores : bool = True,
         use_ob_log_imbalance : bool = True,
         use_ob_log_imbalance_z_scores : bool = True,
+        use_total_size_z_scores : bool = True,
+        use_log_total_size_z_scores : bool = True,
         lookback : int = 501,
         min_index : int = -1, 
         max_index : int = -1
@@ -360,34 +386,71 @@ def create_representation_one(ob_file_name : str = "UNDEFINED",
         df_ob_imbalance_z_scores = pd.DataFrame() 
         df_ob_log_imbalance = pd.DataFrame()        
         df_ob_log_imbalance_z_scores = pd.DataFrame()
-        
-        
+        df_ob_total_size_z_scores = pd.DataFrame()
+        df_ob_log_total_size_z_scores = pd.DataFrame()
+            
         if use_price_diffs_z_scores:
             df_price_diffs = generate_orderbook_price_diffs(df_ob)
             df_price_diffs_z_scores = expw_zscore(df_price_diffs, lookback)
             
         if (use_cum_size_z_scores or use_log_cum_size_z_scores):  
-            df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance = generate_orderbook_cum_size_log_cum_size(df_ob)
-            
+            df_ob_cum_size, df_ob_log_cum_size, df_ob_imbalance, df_ob_log_imbalance, df_ob_total_size, df_ob_log_total_size = generate_orderbook_cum_size_log_cum_size(df_ob)
             df_ob_cum_size_z_scores = expw_zscore(df_ob_cum_size, lookback)
             df_ob_log_cum_size_z_scores = expw_zscore(df_ob_log_cum_size, lookback)
+            
+        if (use_ob_imbalance_z_scores or use_ob_log_imbalance_z_scores):    
             df_ob_imbalance_z_scores = expw_zscore(df_ob_imbalance, lookback)
             df_ob_log_imbalance_z_scores = expw_zscore(df_ob_log_imbalance, lookback)
+            
+        if (use_total_size_z_scores or use_log_total_size_z_scores):
+            df_ob_total_size_z_scores = expw_zscore(df_ob_total_size, lookback) 
+            df_ob_log_total_size_z_scores = expw_zscore(df_ob_log_total_size, lookback)
         
         df_representation_one = pd.DataFrame() # empty dataframe
         if use_price_diffs_z_scores:
-            df_representation_one = df_representation_one.join(df_price_diffs_z_scores)       
+            if df_representation_one.size == 0:
+                df_representation_one = df_price_diffs_z_scores
+            else:
+                df_representation_one = df_representation_one.join(df_price_diffs_z_scores)       
         if use_cum_size_z_scores:
-            df_representation_one = df_representation_one.join(df_ob_cum_size_z_scores)
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_cum_size_z_scores
+            else:
+                df_representation_one = df_representation_one.join(df_ob_cum_size_z_scores)
         if use_log_cum_size_z_scores:
-            df_representation_one = df_representation_one.join(df_ob_log_cum_size_z_scores)
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_log_cum_size_z_scores
+            else:
+                df_representation_one = df_representation_one.join(df_ob_log_cum_size_z_scores)
         if use_ob_imbalance:
-            df_representation_one = df_representation_one.join(df_ob_imbalance[lookback:])
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_imbalance[lookback:]
+            else:
+                df_representation_one = df_representation_one.join(df_ob_imbalance[lookback:])
         if use_ob_imbalance_z_scores:
-            df_representation_one = df_representation_one.join(df_ob_imbalance_z_scores)          
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_imbalance_z_scores
+            else:
+                df_representation_one = df_representation_one.join(df_ob_imbalance_z_scores)          
         if use_ob_log_imbalance:
-            df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance[lookback:]], axis = 1)
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_log_imbalance[lookback:]
+            else:
+                df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance[lookback:]], axis = 1)
         if use_ob_log_imbalance_z_scores:
-            df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance_z_scores], axis = 1)
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_log_imbalance_z_scores
+            else:
+                df_representation_one = pd.concat([df_representation_one, df_ob_log_imbalance_z_scores], axis = 1)
+        if use_total_size_z_scores:
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_total_size_z_scores
+            else:
+                df_representation_one = pd.concat([df_representation_one, df_ob_total_size_z_scores], axis = 1)
+        if use_total_size_z_scores:
+            if df_representation_one.size == 0:
+                df_representation_one = df_ob_log_total_size_z_scores
+            else:
+                df_representation_one = pd.concat([df_representation_one, df_ob_log_total_size_z_scores], axis = 1)
         
         return df_representation_one
