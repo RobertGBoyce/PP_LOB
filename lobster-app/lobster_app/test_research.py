@@ -20,6 +20,7 @@ from lobster_app.research import (
     _historical_standardize, _message_grid, MAX_DIMENSION_ENDPOINTS,
     MAX_DIMENSION_SVD_WORK, _dimension_memory_estimate, rolling_realised_volatility,
     FEATURE_GROUPS, TOM_FEATURES, feature_coordinate_count, _selected_history_features,
+    _historical_standardize_chunk, _HistoryFeatureStream, _feature_chunk_rows,
 )
 
 
@@ -398,18 +399,22 @@ class PatnaikPearsonTests(unittest.TestCase):
 
 
 class DimensionSweepTests(unittest.TestCase):
-    def test_all_118_features_have_unique_names_and_correct_imbalance_formulas(self):
+    def test_all_138_features_have_unique_names_and_correct_formulas(self):
         bid = np.arange(1, 611).reshape(61, 10).astype(float)
         ask = bid * 2 + 7
         data = make_data(bid=bid, ask=ask)
         grid = _message_grid(data, 0, 60 * 10**9, 10)
         values, names, historical = _selected_history_features(data, grid, 10, TOM_FEATURES)
-        self.assertEqual(values.shape, (61, 118))
-        self.assertEqual(len(set(names)), 118)
-        self.assertEqual(historical.sum(), 98)
+        self.assertEqual(values.shape, (61, 138))
+        self.assertEqual(len(set(names)), 138)
+        self.assertEqual(historical.sum(), 118)
+        self.assertEqual(feature_coordinate_count(TOM_FEATURES, 10), 138)
         b, a = bid.cumsum(axis=1), ask.cumsum(axis=1)
         np.testing.assert_allclose(values[:, 78:88], (b-a)/(b+a+1e-6))
         np.testing.assert_allclose(values[:, 98:108], (np.log(b)-np.log(a))/(np.log(b)+np.log(a)+1e-6))
+        np.testing.assert_allclose(values[:, 118:128], b + a)
+        np.testing.assert_allclose(values[:, 128:138], np.log(b + a))
+        self.assertTrue(historical[118:].all())
         for key in FEATURE_GROUPS:
             for choice in ("original", "ewm", "both"):
                 selection = {key: choice}
@@ -417,6 +422,47 @@ class DimensionSweepTests(unittest.TestCase):
                 self.assertEqual(matrix.shape[1], feature_coordinate_count(selection, 10))
                 self.assertEqual(len(set(labels)), len(labels))
                 self.assertEqual(mask.sum(), matrix.shape[1] // 2 if choice == "both" else matrix.shape[1] if choice == "ewm" else 0)
+
+    def test_total_volume_groups_are_independent_and_log_the_combined_volume(self):
+        bid = np.array([[0., 2.], [3., 5.], [1e-12, 7.]])
+        ask = np.array([[0., 4.], [7., 11.], [2e-12, 13.]])
+        data = make_data(times=[0, 1, 2], bid=bid, ask=ask)
+        for levels in (1, 2):
+            grid = _message_grid(data, 0, 2 * 10**9, levels)
+            total = np.column_stack((bid[:, 0] + ask[:, 0], bid.sum(axis=1) + ask.sum(axis=1)))[:, :levels]
+            for key, expected in (("total_volume", total),
+                                  ("log_total_volume", np.log(np.maximum(total, 1e-8)))):
+                for choice in ("original", "ewm", "both"):
+                    with self.subTest(levels=levels, key=key, choice=choice):
+                        selection = {"total_volume": "omit", "log_total_volume": "omit", key: choice}
+                        values, names, mask = _selected_history_features(data, grid, levels, selection)
+                        np.testing.assert_allclose(values, np.tile(expected, (1, 2 if choice == "both" else 1)))
+                        self.assertEqual(feature_coordinate_count(selection, levels), levels * (2 if choice == "both" else 1))
+                        self.assertEqual(len(set(names)), values.shape[1])
+                        np.testing.assert_array_equal(mask, [False] * levels + [True] * levels if choice == "both" else [choice == "ewm"] * levels)
+            self.assertEqual(feature_coordinate_count(TOM_FEATURES, levels), 14 * levels - 2)
+
+    def test_updated_tom_preset_runs_with_delays_and_exports_new_coordinates(self):
+        t = np.arange(650)[:, None]
+        data = make_data(times=np.arange(650) / 10,
+                         bid=100 + (t * np.arange(1, 11)) % 73,
+                         ask=200 + (t * np.arange(2, 12)) % 97)
+        result = run_dimension(data, 0, 64.9, levels=10, sampling="messages",
+                               window_messages=100, embedding="custom", features=TOM_FEATURES,
+                               lag_count=2, lag_spacing_messages=1, evaluation_step_seconds=10)
+        self.assertEqual(result["metrics"]["coordinate_count"], 276)
+        self.assertEqual(result["parameters"]["ewm_warmup_observations"], 501)
+        self.assertEqual(result["parameters"]["features"], TOM_FEATURES)
+        self.assertEqual(result["parameters"]["log_total_volume_floor"], 1e-8)
+        names = result["parameters"]["coordinate_order"]
+        self.assertEqual(len(set(names)), 276)
+        self.assertIn("total_volume_10_ewm_lag_1", names)
+        self.assertIn("log_total_volume_10_ewm_lag_1", names)
+        last = result["series"][-1]
+        self.assertEqual(last["status"], "ok")
+        self.assertEqual(last["point_count"], 99)
+        self.assertAlmostEqual(last["normalized_dimension"], last["dimension"] / 276)
+        json.dumps(result, allow_nan=False)
 
     def test_custom_78_features_match_previous_collaborator_calculation(self):
         args = dict(levels=2, step_seconds=1, window_seconds=10, evaluation_step_seconds=10, ewm_lookback=3)
@@ -689,6 +735,99 @@ class DimensionSweepTests(unittest.TestCase):
         self.assertGreater(_dimension_memory_estimate(1000, 78, 390, 100, 10), small)
         self.assertGreater(_dimension_memory_estimate(1000, 78, 78, 1000, 10), small)
         self.assertGreater(_dimension_memory_estimate(1000, 78, 78, 100, 100), small)
+
+
+class StreamingDimensionTests(unittest.TestCase):
+    def test_chunked_moments_match_full_history_across_invalid_boundaries(self):
+        values = np.random.default_rng(21).normal(size=(110, 5)) * [1, 100, .1, 0, 1e-8]
+        valid = np.ones(110, dtype=bool)
+        valid[[0, 1, 7, 8, 9, 30, 63, 64, 65, 109]] = False
+        values[~valid] = np.nan
+        expected, expected_warmup = _historical_standardize(values, valid, 11)
+        for chunk in (1, 7, 11, 32, 200):
+            state, parts, warmups = None, [], []
+            for start in range(0, len(values), chunk):
+                part, warmup, state = _historical_standardize_chunk(
+                    values[start:start + chunk], valid[start:start + chunk], 11, state)
+                parts.append(part)
+                warmups.append(warmup)
+            with self.subTest(chunk=chunk):
+                np.testing.assert_allclose(np.concatenate(parts), expected, rtol=1e-12, atol=1e-12)
+                np.testing.assert_array_equal(np.concatenate(warmups), expected_warmup)
+                self.assertIsNone(state)
+
+    def test_rolling_buffer_matches_eager_features_without_restarting_history(self):
+        data = make_data()
+        grid = _message_grid(data, 0, 60 * 10**9, 2)
+        raw, names, mask = _selected_history_features(data, grid, 2, TOM_FEATURES)
+        valid = np.ones(61, dtype=bool)
+        valid[[0, 7, 8, 29, 58]] = False
+        expected = raw.copy()
+        expected[:, mask], warmup = _historical_standardize(raw[:, mask], valid, 3)
+        for chunk in (1, 4, 13):
+            sizes = []
+
+            def builder(part):
+                """Record allocation sizes while building the reference features.
+
+                Parameters
+                ----------
+                part : pandas.DataFrame
+                    Consecutive sampled rows.
+
+                Returns
+                -------
+                tuple
+                    Feature values, names and historical mask.
+                """
+                sizes.append(len(part))
+                return _selected_history_features(data, part, 2, TOM_FEATURES)
+
+            stream = _HistoryFeatureStream(grid, builder, valid, 5, chunk, 3)
+            for end in (1, 7, 20, 21, 60, 61):
+                stream.advance(end)
+                positions = np.arange(max(0, end - 5), end)
+                np.testing.assert_allclose(stream.take(positions), expected[positions], rtol=1e-12, atol=1e-12)
+                self.assertEqual(stream.buffer.shape, (5, 26))
+            self.assertLessEqual(max(sizes), chunk)
+            self.assertEqual(stream.names, names)
+            np.testing.assert_array_equal(stream.valid, valid & np.isfinite(expected).all(axis=1))
+            np.testing.assert_array_equal(stream.warmup, warmup)
+            with self.assertRaisesRegex(RuntimeError, "outside the rolling buffer"):
+                stream.take(np.array([0]))
+
+    def test_sweeps_are_independent_of_chunks_with_ties_gaps_and_delays(self):
+        times = np.repeat(np.arange(50), 2).astype(float)
+        times[60:] += 10
+        data = make_data(times=times)
+        data.features.loc[[0, 13, 14, 29, 30, 61, 75, 99], "valid_quote"] = False
+        for sampling in ("clock", "messages"):
+            args = dict(levels=2, sampling=sampling, step_seconds=1,
+                        window_seconds=10, window_messages=12, lag_count=3,
+                        lag_spacing_seconds=2, lag_spacing_messages=2,
+                        evaluation_step_seconds=7, max_age_seconds=2,
+                        ewm_lookback=3, embedding="custom", features=TOM_FEATURES)
+            expected = run_dimension(data, 0, 59, **args)
+            for chunk in (1, 7):
+                with patch("lobster_app.research.DIMENSION_FEATURE_CHUNK_ROWS", chunk):
+                    actual = run_dimension(data, 0, 59, **args)
+                self.assertEqual(actual["parameters"]["ewm_warmup_observations"], expected["parameters"]["ewm_warmup_observations"])
+                for a, b in zip(actual["series"], expected["series"]):
+                    for key in a:
+                        if key in ("dimension", "normalized_dimension", "singular_values") and a[key] is not None:
+                            np.testing.assert_allclose(a[key], b[key], rtol=1e-11, atol=1e-11)
+                        else:
+                            self.assertEqual(a[key], b[key], key)
+
+    def test_large_period_budget_retains_only_window_and_chunk_features(self):
+        small = _dimension_memory_estimate(250_000, 138, 138, 5000, 391,
+                                          history_samples=5000, levels=10, event_count=250_000)
+        large = _dimension_memory_estimate(500_000, 138, 138, 5000, 391,
+                                          history_samples=5000, levels=10, event_count=500_000)
+        self.assertLess(small, 256 * 1024**2)
+        # Extra duration adds only grid and interval metadata, not full feature matrices.
+        self.assertEqual(large - small, 250_000 * (128 + 32 * 10 + 64))
+        self.assertLessEqual(_feature_chunk_rows(5000) * 5000 * 8, 8 * 1024**2)
 
 
 class CollaboratorRepresentationTests(unittest.TestCase):
