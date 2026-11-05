@@ -72,6 +72,8 @@ SETTING_HELP = {
     "Cumulative volumes": (r"Add displayed shares from level 1 through each level k, separately for bids and asks.", r"B_k=\sum_{j=1}^{k}q^b_j,\quad A_k=\sum_{j=1}^{k}q^a_j"),
     "Logarithms of cumulative volumes": (r"Take the logarithm of each cumulative bid and ask volume, flooring volumes at 0.00000001.", r"\log(\max(B_k,10^{-8})),\quad\log(\max(A_k,10^{-8}))"),
     "Volume imbalance": (r"Compare cumulative bid volume B with cumulative ask volume A through each level k.", r"I_k=(B_k-A_k)/(B_k+A_k+10^{-6})"),
+    "Combined cumulative volumes": (r"Add cumulative bid volume B and cumulative ask volume A through each level k.", r"T_k=B_k+A_k"),
+    "Logarithms of combined cumulative volumes": (r"Take the logarithm of combined cumulative bid and ask volume, flooring the total at 0.00000001.", r"\log(\max(B_k+A_k,10^{-8}))"),
     "Imbalance using logarithms of volumes": (r"Use the difference between log cumulative volumes divided by their sum, flooring volumes before taking logs.", r"J_k=(\log B_k-\log A_k)/(\log B_k+\log A_k+10^{-6})"),
     "Log volumes at each level": (r"Take the logarithm of one plus the displayed shares at each individual bid and ask level.", r"\log(1+q_k)"),
     "Volumes as proportions of total depth": (r"Divide each level's displayed volume by the total across all selected bid and ask levels.", r"q_k/\sum_{j=1}^{L}(q^b_j+q^a_j)"),
@@ -558,16 +560,16 @@ def result_figures(result):
         records = result["series"]
         times = [r["time"] for r in records]
         dimension = go.Figure()
-        dimension.add_scatter(x=times, y=[r["dimension"] for r in records], name="PP dimension", mode="lines+markers",
+        dimension.add_scatter(x=times, y=[r["normalized_dimension"] for r in records], name="Normalised PP dimension", mode="lines+markers",
                               line_color=BID, marker_size=4, connectgaps=False,
                               customdata=[[r["point_count"], r["coordinate_count"], r["status"], i, result["run_id"]] for i, r in enumerate(records)],
-                              hovertemplate="%{x}<br>PP %{y:.4f}<br>%{customdata[0]} points · %{customdata[1]} coordinates<br>%{customdata[2]}<extra></extra>")
-        dimension.add_scatter(x=times, y=[r["rank_bound"] for r in records], name="Upper bound on dimension", mode="lines", line={"color": MUTED, "dash": "dot"},
+                              hovertemplate="%{x}<br>PP / coordinates %{y:.4f}<br>%{customdata[0]} points · %{customdata[1]} coordinates<br>%{customdata[2]}<extra></extra>")
+        dimension.add_scatter(x=times, y=[r["rank_bound"] / r["coordinate_count"] for r in records], name="Upper bound on normalised dimension", mode="lines", line={"color": MUTED, "dash": "dot"},
                               customdata=[[r["point_count"], r["coordinate_count"], r["status"], i, result["run_id"]] for i, r in enumerate(records)])
         dimension.update_layout(hovermode="x unified")
-        dimension.update_yaxes(title_text="Patnaik Pearson dimension", rangemode="tozero")
+        dimension.update_yaxes(title_text="PP dimension / coordinates", rangemode="tozero")
         dimension.update_xaxes(title_text="Snapshot time" if result["parameters"]["mode"] == "snapshot" else "History window ending time")
-        return [card("Dimension through time", graph(styled(dimension), "pp-dimension-time"), "Hover over a time to inspect its estimate below. Gaps indicate undefined estimates. With N observations and d numbers per observation, dimension cannot exceed min(N − 1, d). Linear dependencies can lower this bound.", True)]
+        return [card("Normalised dimension through time", graph(styled(dimension), "pp-dimension-time"), "PP dimension divided by the number of coordinates d. Hover over a time to inspect its estimate below. Gaps indicate undefined estimates. With N observations, the upper bound is min(N − 1, d) / d.", True)]
     if result["method"] == "pca":
         x = list(range(1, len(result["explained_variance"]) + 1))
         variance = go.Figure()
@@ -1921,10 +1923,10 @@ def compare_runs(selection, history):
         fig = go.Figure()
         for r in matched:
             records = r["series"]
-            fig.add_scatter(x=[point["time"] for point in records], y=[point["dimension"] for point in records], name=r["run_id"], mode="lines+markers", connectgaps=False, marker_size=4)
+            fig.add_scatter(x=[point["time"] for point in records], y=[point["normalized_dimension"] for point in records], name=r["run_id"], mode="lines+markers", connectgaps=False, marker_size=4)
         fig.update_xaxes(title_text="Exchange clock")
-        fig.update_yaxes(title_text="Patnaik Pearson dimension", rangemode="tozero")
-        figures.append(card("Dimension across price levels" if mode == "snapshot" else "Dimension through time", graph(styled(fig)),
+        fig.update_yaxes(title_text="PP dimension / coordinates", rangemode="tozero")
+        figures.append(card("Normalised dimension across price levels" if mode == "snapshot" else "Normalised dimension through time", graph(styled(fig)),
                             "Changing the variables, their scaling, the times included or the number of observations can change the dimension. Check these settings when comparing results.", True))
     settings = pd.DataFrame(summary)
     settings = settings.loc[:, [col for col in settings if not settings[col].map(lambda value: pd.isna(value) or value == "—").all()]]

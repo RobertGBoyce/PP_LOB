@@ -21,6 +21,8 @@ MAX_DIMENSION_ENDPOINTS = 5000
 # this budget in the tens of seconds. This is not a wall-clock timeout.
 MAX_DIMENSION_SVD_WORK = 300_000_000_000
 MAX_DIMENSION_MEMORY_BYTES = 1024 ** 3
+DIMENSION_FEATURE_CHUNK_ROWS = 4096
+DIMENSION_FEATURE_CHUNK_BYTES = 8 * 1024 ** 2
 
 
 def _seconds_ns(value, name, *, allow_zero=True):
@@ -820,7 +822,7 @@ def _dimension_history_features(data, grid, levels, embedding):
         rows = grid["row"].to_numpy(dtype=np.int64)
         # Recover LOBSTER integer price units before taking differences. The
         # variance regulariser in historical scaling makes these units matter.
-        prices = {side: np.rint(data.book[[f"{side}_price_{k}" for k in range(1, levels + 1)]].to_numpy(dtype=float)[rows] * 10_000)
+        prices = {side: np.rint(data.book.iloc[rows][[f"{side}_price_{k}" for k in range(1, levels + 1)]].to_numpy(dtype=float) * 10_000)
                   for side in ("ask", "bid")}
         ask, bid = prices["ask"], prices["bid"]
         differences = [ask[:, 1:] - ask[:, :1], ask - bid[:, :1],
@@ -862,12 +864,24 @@ FEATURE_GROUPS = {
     "log_cumulative_volume": "Logarithms of cumulative volumes",
     "imbalance": "Volume imbalance",
     "log_imbalance": "Imbalance using logarithms of volumes",
+    "total_volume": "Combined cumulative volumes",
+    "log_total_volume": "Logarithms of combined cumulative volumes",
     "log_depth": "Log volumes at each level",
     "relative_depth": "Volumes as proportions of total depth",
     "mid_distances": "Distances from the midquote",
 }
-TOM_FEATURES = {key: ("ewm" if i < 3 else "both" if i < 5 else "omit")
-                for i, key in enumerate(FEATURE_GROUPS)}
+TOM_FEATURES = {
+    "price_differences": "ewm",
+    "cumulative_volume": "ewm",
+    "log_cumulative_volume": "ewm",
+    "imbalance": "both",
+    "log_imbalance": "both",
+    "total_volume": "ewm",
+    "log_total_volume": "ewm",
+    "log_depth": "omit",
+    "relative_depth": "omit",
+    "mid_distances": "omit",
+}
 
 
 def feature_coordinate_count(features, levels):
@@ -891,7 +905,7 @@ def feature_coordinate_count(features, levels):
     for key, choice in features.items():
         if choice not in ("omit", "original", "ewm", "both"):
             raise ValueError("Choose an available feature transformation.")
-        width = 4 * levels - 2 if key == "price_differences" else levels if key in ("imbalance", "log_imbalance") else 2 * levels
+        width = 4 * levels - 2 if key == "price_differences" else levels if key in ("imbalance", "log_imbalance", "total_volume", "log_total_volume") else 2 * levels
         count += width * (2 if choice == "both" else 0 if choice == "omit" else 1)
     return count
 
@@ -921,7 +935,7 @@ def _selected_history_features(data, grid, levels, features):
         choice = features.get(key, "omit")
         if choice == "omit":
             continue
-        if key in ("price_differences", "cumulative_volume", "log_cumulative_volume", "imbalance", "log_imbalance"):
+        if key in ("price_differences", "cumulative_volume", "log_cumulative_volume", "imbalance", "log_imbalance", "total_volume", "log_total_volume"):
             if cumulative is None:
                 cumulative = {side: np.cumsum(grid[[f"{side}_size_{k}" for k in range(1, levels + 1)]].to_numpy(dtype=float), axis=1)
                               for side in ("ask", "bid")}
@@ -933,6 +947,11 @@ def _selected_history_features(data, grid, levels, features):
                 if key == "log_cumulative_volume":
                     values = np.log(np.maximum(values, 1e-8))
                 labels = [f"{key}_{side}_{k}" for side in ("ask", "bid") for k in range(1, levels + 1)]
+            elif key in ("total_volume", "log_total_volume"):
+                values = cumulative["bid"] + cumulative["ask"]
+                if key == "log_total_volume":
+                    values = np.log(np.maximum(values, 1e-8))
+                labels = [f"{key}_{k}" for k in range(1, levels + 1)]
             else:
                 bid, ask = cumulative["bid"], cumulative["ask"]
                 if key == "log_imbalance":
@@ -986,6 +1005,142 @@ def _historical_standardize(values, valid, lookback):
             scaled = ((series - mean) / np.sqrt(variance + 1e-6)).to_numpy()
             output[start + lookback:stop, column] = scaled[lookback:]
     return output, warmup
+
+
+def _historical_standardize_chunk(values, valid, lookback, state):
+    """Carry causal exponential moments across consecutive chunks.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Chronological coordinates requiring historical standardisation.
+    valid : numpy.ndarray
+        Raw observation validity, before historical warmup exclusions.
+    lookback : int
+        Number of valid observations excluded after each initialisation.
+    state : tuple or None
+        Next mean, next variance and valid run length from the preceding chunk.
+
+    Returns
+    -------
+    tuple
+        Standardised values, warmup mask and continuation state. An invalid
+        observation resets the moments, including at chunk boundaries.
+    """
+    alpha = 1.0 - np.exp(np.log(.01) / lookback)
+    output = np.full_like(values, np.nan, dtype=float)
+    warmup = np.zeros(len(values), dtype=bool)
+    edges = np.diff(np.r_[False, valid, False].astype(int))
+    for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        if start:
+            state = None
+        mean, variance, count = (state if state is not None else
+                                 (values[start].copy(), np.zeros(values.shape[1]), 0))
+        segment = values[start:stop]
+        # Seed EWM with the moments after the previous chunk. The first row
+        # then uses those moments, before its own observation updates them.
+        means = pd.DataFrame(np.vstack((mean, segment))).ewm(alpha=alpha, adjust=False).mean().to_numpy()
+        residuals = segment - means[:-1]
+        variances = pd.DataFrame(np.vstack((variance, residuals ** 2))).ewm(alpha=alpha, adjust=False).mean().to_numpy()
+        output[start:stop] = residuals / np.sqrt(variances[:-1] + 1e-6)
+        warmup[start:min(stop, start + max(0, lookback - count))] = True
+        state = (means[-1].copy(), variances[-1].copy(), count + stop - start)
+    if len(valid) and not valid[-1]:
+        state = None
+    output[warmup] = np.nan
+    return output, warmup, state
+
+
+def _feature_chunk_rows(coordinates):
+    """Bound both the row count and byte size of one feature chunk.
+
+    Parameters
+    ----------
+    coordinates : int
+        Coordinates per snapshot, including temporary feature construction.
+
+    Returns
+    -------
+    int
+        Positive number of rows allowed in a chunk.
+    """
+    return max(1, min(DIMENSION_FEATURE_CHUNK_ROWS,
+                      DIMENSION_FEATURE_CHUNK_BYTES // (8 * max(1, coordinates))))
+
+
+class _HistoryFeatureStream:
+    """Build consecutive feature chunks and retain a bounded rolling history.
+
+    Parameters
+    ----------
+    grid : pandas.DataFrame
+        Ordered sampled observations, including invalid rows.
+    builder : callable
+        Build values, coordinate names and historical mask for a grid slice.
+    valid : numpy.ndarray
+        Raw validity copied before warmup and finite feature exclusions.
+    capacity : int
+        Maximum rows retained for an estimation window, including delay history.
+    chunk_rows : int
+        Maximum rows constructed at once.
+    lookback : int or None
+        Historical warmup length, or None to retain original features.
+    """
+
+    def __init__(self, grid, builder, valid, capacity, chunk_rows, lookback):
+        self.grid, self.builder = grid, builder
+        probe, self.names, self.historical = builder(grid.iloc[:1])
+        self.capacity = max(1, min(len(grid), capacity))
+        self.buffer = np.empty((self.capacity, probe.shape[1]), dtype=float)
+        self.valid = valid.copy()
+        self.warmup = np.zeros(len(grid), dtype=bool)
+        self.chunk_rows, self.lookback = chunk_rows, lookback
+        self.position, self.state = 0, None
+
+    def advance(self, stop):
+        """Process all observations through an exclusive sampled position.
+
+        Parameters
+        ----------
+        stop : int
+            Exclusive ending position, never earlier than the previous call.
+
+        Returns
+        -------
+        None
+        """
+        for start in range(self.position, stop, self.chunk_rows):
+            end = min(stop, start + self.chunk_rows)
+            values, _, _ = self.builder(self.grid.iloc[start:end])
+            valid = self.valid[start:end] & np.isfinite(values).all(axis=1)
+            if self.lookback is not None:
+                scaled, warmup, self.state = _historical_standardize_chunk(
+                    values[:, self.historical], valid, self.lookback, self.state)
+                values[:, self.historical] = scaled
+                self.warmup[start:end] = warmup
+            self.valid[start:end] = valid & np.isfinite(values).all(axis=1)
+            keep = min(self.capacity, end - start)
+            positions = np.arange(end - keep, end) % self.capacity
+            self.buffer[positions] = values[-keep:]
+        self.position = stop
+
+    def take(self, positions):
+        """Read retained rows in the requested order.
+
+        Parameters
+        ----------
+        positions : numpy.ndarray
+            Original sampled positions within the retained window.
+
+        Returns
+        -------
+        numpy.ndarray
+            Feature rows in the requested order.
+        """
+        if len(positions) and (positions.min() < max(0, self.position - self.capacity)
+                               or positions.max() >= self.position):
+            raise RuntimeError("Requested feature rows are outside the rolling buffer.")
+        return self.buffer[positions % self.capacity]
 
 
 def _message_grid(data, start_ns, end_ns, levels):
@@ -1096,7 +1251,8 @@ def _dimension_endpoint_grid(data, start_ns, end_ns, interval_ns):
 
 
 def _dimension_memory_estimate(sample_count, base_coordinates, coordinates,
-                               candidate_points, endpoint_count):
+                               candidate_points, endpoint_count, *, history_samples=None,
+                               levels=0, event_count=0):
     """Estimate additional memory for a dimension sweep before allocation.
 
     Parameters
@@ -1111,6 +1267,13 @@ def _dimension_memory_estimate(sample_count, base_coordinates, coordinates,
         Maximum rows in a matrix that will actually be calculated.
     endpoint_count : int
         Number of requested estimates.
+    history_samples : int or None, optional
+        Retained history rows including delay constituents. Defaults to the
+        candidate point count for callers without delayed observations.
+    levels : int, optional
+        Levels per side in the sampled metadata and size grid.
+    event_count : int, optional
+        Source rows requiring validity and interval bookkeeping.
 
     Returns
     -------
@@ -1121,11 +1284,14 @@ def _dimension_memory_estimate(sample_count, base_coordinates, coordinates,
     """
     samples, base, columns, rows, endpoints = map(
         int, (sample_count, base_coordinates, coordinates, candidate_points, endpoint_count))
-    features = 4 * 8 * samples * base
-    matrix_copies = 6 * 8 * rows * columns
+    history = min(samples, rows if history_samples is None else int(history_samples))
+    chunk = min(samples, _feature_chunk_rows(base))
+    features = 8 * base * (history + 8 * chunk)
+    bookkeeping = samples * (128 + 32 * levels) + 64 * event_count
+    matrix_copies = 8 * 8 * rows * columns
     results = 64 * endpoints * (min(rows, columns) + columns)
     names = 160 * columns
-    return features + matrix_copies + results + names
+    return features + bookkeeping + matrix_copies + results + names
 
 
 def _check_dimension_memory(estimated_bytes):
@@ -1373,9 +1539,12 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
             lower, upper = max(start_ns, int(event_ns[0])), min(end_ns, int(event_ns[-1]))
             first_sample = ((lower + step_ns - 1) // step_ns) * step_ns
             sample_count = max(0, (upper - first_sample) // step_ns + 1)
+        feature_workspace = max(base_coordinates, 8 * levels - 2) if embedding == "custom" else base_coordinates
+        history_samples = min(window_samples, sample_count) if complete_windows else 1
         memory_estimate = _dimension_memory_estimate(
-            sample_count, max(base_coordinates, 8 * levels - 2) if embedding == "custom" else base_coordinates, coordinate_count,
-            min(candidate_points, sample_count) if complete_windows else 0, len(endpoints))
+            sample_count, feature_workspace, coordinate_count,
+            min(candidate_points, sample_count) if complete_windows else 0, len(endpoints),
+            history_samples=history_samples, levels=levels, event_count=len(event_ns))
         _check_dimension_memory(memory_estimate)
         work = complete_windows * candidate_points * coordinate_count * min(candidate_points, coordinate_count)
         if work > MAX_DIMENSION_SVD_WORK:
@@ -1389,36 +1558,34 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
         selected_sources = event_ns[source_rows] >= start_ns
         base_valid = (grid["valid"].to_numpy(dtype=bool) & event_valid[source_rows] & selected_sources)
         if embedding == "custom":
-            base_values, base_names, historical_columns = _selected_history_features(data, grid, levels, features)
+            builder = lambda part: _selected_history_features(data, part, levels, features)
             params["features"] = dict(features)
             params["feature_source"] = "https://github.com/RobertGBoyce/PP_LOB/blob/main/LOB/helper.py"
             params["imbalance_epsilon"] = 1e-6
             params["log_cumulative_volume_floor"] = 1e-8
+            params["log_total_volume_floor"] = 1e-8
         else:
-            base_values, base_names = _dimension_history_features(data, grid, levels, embedding)
-            historical_columns = np.ones(base_values.shape[1], dtype=bool)
-        base_valid &= np.isfinite(base_values).all(axis=1)
-        warmup = np.zeros(len(grid), dtype=bool)
+            builder = lambda part: (*_dimension_history_features(data, part, levels, embedding),
+                                    np.ones(base_coordinates, dtype=bool))
+        stream = _HistoryFeatureStream(
+            grid, builder, base_valid, history_samples, _feature_chunk_rows(feature_workspace),
+            ewm_lookback if scaling == "ewm" or custom_historical else None)
+        base_valid, warmup = stream.valid, stream.warmup
+        params.update({"feature_processing": "Bounded chunks with a rolling feature buffer. Historical moments continue across chunks and reset only at invalid observations.",
+                       "feature_chunk_rows": stream.chunk_rows, "feature_buffer_rows": stream.capacity})
         if scaling == "ewm" or custom_historical:
-            scaled_values, warmup = _historical_standardize(base_values[:, historical_columns], base_valid, ewm_lookback)
-            base_values[:, historical_columns] = scaled_values
-            base_valid &= np.isfinite(base_values).all(axis=1)
             params.update({"ewm_lookback": int(ewm_lookback), "ewm_decay": float(np.exp(np.log(.01) / ewm_lookback)),
                            "ewm_variance_epsilon": 1e-6,
                            "scaling_policy": "Subtract the exponentially weighted mean of strictly earlier sampled observations and divide by sqrt(previous variance + 1e-6). Variance is the exponentially weighted squared error from the previous mean. No additional within estimate standardisation.",
                            "ewm_initialisation": "Initial mean is the first valid observation and variance is zero. Discard the first lookback observations. Restart after each invalid sampled observation. No observations before the selected start are used.",
-                           "ewm_warmup_observations": int(warmup.sum())})
+                           "ewm_warmup_observations": 0})
             if embedding == "custom":
                 params["scaling_policy"] = "Historical standardisation applies only to selected coordinates. Original coordinates are retained unchanged. All columns are then centred within each estimate" + (" and divided by their within estimate standard deviations." if scaling == "standardize" else ".")
-        feature_names = [f"{name}_lag_{lag}" for lag in range(lag_count) for name in base_names]
-        valid_delays = np.zeros(len(grid), dtype=bool)
+        feature_names = [f"{name}_lag_{lag}" for lag in range(lag_count) for name in stream.names]
         bad_interval = np.zeros(len(grid), dtype=bool)
         stale_interval = np.zeros(len(grid), dtype=bool)
         delay_positions = np.arange(lag_span, len(grid), dtype=np.int64)
         if len(delay_positions):
-            valid_delays[delay_positions] = True
-            for lag in range(lag_count):
-                valid_delays[delay_positions] &= base_valid[delay_positions - lag * lag_steps]
             if lag_span:
                 left = grid_ns[delay_positions - lag_span]
                 right = grid_ns[delay_positions]
@@ -1436,7 +1603,6 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
                     bad_interval[delay_positions] |= (bad_prefix[delay_positions + 1]
                                                        - bad_prefix[delay_positions - lag_span]) > 0
                     stale_interval[:] = False
-                valid_delays &= ~bad_interval & ~stale_interval
         params.update({"embedding": embedding, "step_seconds": step_ns / NANOSECONDS,
                        "window_seconds": window_ns / NANOSECONDS, "lag_count": lag_count,
                        "lag_spacing_seconds": spacing_ns / NANOSECONDS,
@@ -1466,6 +1632,7 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
         for endpoint in endpoints:
             timestamp = day + pd.Timedelta(int(endpoint), unit="ns")
             hi = int(np.searchsorted(grid_ns, endpoint, side="right"))
+            stream.advance(hi)
             if sampling == "messages":
                 lo = max(0, hi - window_messages)
                 left_ns = int(grid_ns[lo]) if hi else max(start_ns, int(event_ns[0]))
@@ -1475,13 +1642,16 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
                 lo = int(np.searchsorted(grid_ns, left_ns, side="left"))
                 incomplete = left_ns < max(start_ns, int(event_ns[0]))
             positions = np.arange(min(lo + lag_span, hi), hi, dtype=np.int64)
-            retained = positions[valid_delays[positions]]
+            valid_delays = ~(bad_interval[positions] | stale_interval[positions])
+            for lag in range(lag_count):
+                valid_delays &= base_valid[positions - lag * lag_steps]
+            retained = positions[valid_delays]
             if incomplete:
                 record = patnaik_pearson(np.empty((0, coordinate_count)), estimator_scaling)
                 record["status"] = "incomplete_window"
                 retained = np.empty(0, dtype=np.int64)
             else:
-                points = (np.concatenate([base_values[retained - lag * lag_steps]
+                points = (np.concatenate([stream.take(retained - lag * lag_steps)
                                           for lag in range(lag_count)], axis=1)
                           if len(retained) else np.empty((0, coordinate_count)))
                 record = patnaik_pearson(points, estimator_scaling)
@@ -1506,6 +1676,11 @@ def run_dimension(data, start_seconds, end_seconds, step_seconds=5, levels=10,
                            "earliest_source_row": int(source_rows[retained[0] - lag_span]) if len(retained) else None,
                            "latest_source_row": int(source_rows[retained[-1]]) if len(retained) else None})
             records.append(record)
+        # Include trailing observations in the historical exclusion count,
+        # even when no evaluation endpoint occurs at the end of the selection.
+        stream.advance(len(grid))
+        if scaling == "ewm" or custom_historical:
+            params["ewm_warmup_observations"] = int(warmup.sum())
     successes = [r for r in records if r["status"] == "ok"]
     values = [r["dimension"] for r in successes]
     latest = successes[-1] if successes else None
